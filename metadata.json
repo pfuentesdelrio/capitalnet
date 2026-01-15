@@ -1,0 +1,7 @@
+{
+  "name": "Capital Inteligente - Ticket Hub",
+  "description": "A sophisticated ticket management system for internal requests, featuring a Kanban workflow, file attachments, and AI-powered ticket analysis.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
