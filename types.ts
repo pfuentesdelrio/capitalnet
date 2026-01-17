@@ -17,10 +17,9 @@ export enum TicketStatus {
 
 export enum TicketArea {
   COMMERCIAL = 'Comercial',
+  OPERATIONS = 'Operaciones',
   MARKETING = 'Marketing',
-  OPERATIONS = 'Operativa',
-  SUPPORT = 'Soporte',
-  CREDIT = 'Crediticia'
+  BUSINESS_PARTNER = 'Bussines Partner'
 }
 
 export enum UserRole {
@@ -42,6 +41,7 @@ export interface Message {
   role: UserRole;
   text: string;
   timestamp: string;
+  attachments?: Attachment[];
 }
 
 export interface Ticket {
@@ -53,6 +53,7 @@ export interface Ticket {
   area: TicketArea;
   status: TicketStatus;
   description: string;
+  priority: number; // 0-100%
   attachments: Attachment[];
   messages: Message[];
   createdAt: string;
@@ -64,5 +65,6 @@ export interface User {
   name: string;
   email: string;
   role: UserRole;
+  area?: TicketArea;
   avatar: string;
 }

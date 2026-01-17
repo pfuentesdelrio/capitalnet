@@ -13,12 +13,13 @@ const AnalyticsView: React.FC<AnalyticsViewProps> = ({ tickets }) => {
     const [selectedMonth, setSelectedMonth] = useState<string>('all');
 
     const years = useMemo(() => {
-        const uniqueYears = new Set<string>();
+        const uniqueYears = new Set<string>(['2024', '2025', '2026', '2027', '2028', '2029', '2030']);
         tickets.forEach(t => {
-            const year = t.createdAt.split('-')[0];
+            const dateStr = t.createdAt.includes('/') ? t.createdAt.split(' ')[0].split('/').reverse().join('-') : t.createdAt.split(' ')[0];
+            const year = dateStr.split('-')[0];
             if (year && year.length === 4) uniqueYears.add(year);
         });
-        return Array.from(uniqueYears).sort((a, b) => b.localeCompare(a));
+        return Array.from(uniqueYears).sort((a, b) => a.localeCompare(b));
     }, [tickets]);
 
     const filteredData = useMemo(() => {

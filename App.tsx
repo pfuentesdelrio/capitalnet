@@ -1,5 +1,4 @@
-
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   LayoutDashboard,
   PlusCircle,
@@ -30,13 +29,19 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Moon,
-  Sun
+  Sun,
+  Shield,
+  ShieldAlert,
+  UserPlus
 } from 'lucide-react';
 import { User, UserRole, Ticket, TicketStatus, TicketType, Attachment, Message, TicketArea } from './types';
 import TicketForm from './components/TicketForm';
 import KanbanBoard from './components/KanbanBoard';
 import AnalyticsView from './components/AnalyticsView';
-import FloatingLines from './components/FloatingLines';
+import UserAccessView from './components/UserAccessView';
+import AuthView from './components/AuthView';
+import { supabase } from './supabase';
+import { uploadMultipleFiles } from './utils/fileUpload';
 
 // Mock initial state
 const MOCK_USER_EXECUTIVE: User = {
@@ -44,6 +49,7 @@ const MOCK_USER_EXECUTIVE: User = {
   name: 'Xavier Trabajador',
   email: 'xavier@capitalinteligente.com',
   role: UserRole.EXECUTIVE,
+  area: TicketArea.OPERATIONS,
   avatar: 'https://picsum.photos/seed/executive/100/100'
 };
 
@@ -62,9 +68,10 @@ const INITIAL_TICKETS: Ticket[] = [
     userName: 'Xavier Trabajador',
     title: 'Error en el cotizador de seguros',
     type: TicketType.ERROR,
-    area: TicketArea.SUPPORT,
+    area: TicketArea.OPERATIONS,
     status: TicketStatus.IN_PROGRESS,
     description: 'El cotizador no está calculando correctamente la prima cuando se selecciona el descuento por pronto pago. He intentado varias veces y arroja un NaN.',
+    priority: 85,
     attachments: [
       { id: 'att-1', name: 'error_screenshot.png', type: 'image/png', url: 'https://picsum.photos/seed/err/800/600', size: '256KB' }
     ],
@@ -84,6 +91,7 @@ const INITIAL_TICKETS: Ticket[] = [
     area: TicketArea.MARKETING,
     status: TicketStatus.REVIEW,
     description: 'Nos gustaría poder exportar el reporte trimestral directamente a formato JSON para nuestra herramienta de BI.',
+    priority: 40,
     attachments: [],
     messages: [],
     createdAt: '2023-10-25 11:20',
@@ -92,33 +100,268 @@ const INITIAL_TICKETS: Ticket[] = [
 ];
 
 const App: React.FC = () => {
-  const [currentUser, setCurrentUser] = useState<User>(MOCK_USER_EXECUTIVE);
-  const [tickets, setTickets] = useState<Ticket[]>(INITIAL_TICKETS);
-  const [view, setView] = useState<'dashboard' | 'create' | 'kanban' | 'analytics'>('dashboard');
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [allUsers, setAllUsers] = useState<User[]>([]);
+  const [chatAttachments, setChatAttachments] = useState<Attachment[]>([]);
+  const chatFileInputRef = useRef<HTMLInputElement>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [view, setView] = useState<'dashboard' | 'create' | 'kanban' | 'analytics' | 'access'>('dashboard');
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
   const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [isDarkMode, setIsDarkMode] = useState(false);
 
-  const isAdmin = currentUser.role === UserRole.ADMIN;
+  const isAdmin = currentUser?.role === UserRole.ADMIN;
+
+  const handleSessionCheck = async () => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) {
+        console.log('Session found, fetching profile...');
+        // Parallelize fetching for speed
+        // Note: fetchUserProfile and fetchData are defined below but accessible due to closure scope when this runs
+        const profilePromise = fetchUserProfile(session.user.id);
+        fetchData();
+        await profilePromise;
+      } else {
+        console.log('No session found');
+        setLoading(false);
+      }
+    } catch (e) {
+      console.error('Error checking session:', e);
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    // Safety timeout
+    const safetyTimeout = setTimeout(() => {
+      setLoading((current) => {
+        if (current) return false;
+        return current;
+      });
+    }, 3000);
+
+    // Immediate check
+    handleSessionCheck();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      console.log('Auth state changed:', event);
+      if (event === 'SIGNED_OUT') {
+        setCurrentUser(null);
+        setTickets([]);
+        setLoading(false);
+      } else if (event === 'SIGNED_IN' && session) {
+        await fetchUserProfile(session.user.id);
+        fetchData();
+      }
+    });
+
+    return () => {
+      clearTimeout(safetyTimeout);
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  const fetchUserProfile = async (userId: string) => {
+    try {
+      // Create a timeout promise
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Profile fetch timed out after 5s')), 5000)
+      );
+
+      // Create the fetch promise
+      const fetchPromise = supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .maybeSingle(); // Use maybeSingle to avoid 406/JSON errors on empty results
+
+      // Race them
+      const { data, error } = await Promise.race([fetchPromise, timeoutPromise]) as any;
+
+      if (error) {
+        console.error('Error fetching user profile:', error);
+        alert('Error al cargar tu perfil: ' + error.message);
+        await supabase.auth.signOut();
+        return;
+      }
+
+      if (data) {
+        setCurrentUser(data);
+        // Force view update just in case
+        setLoading(false);
+      } else {
+        console.warn('User authenticated but no profile found in DB.');
+        alert('Usuario autenticado pero sin perfil asignado. Contacte a soporte.');
+        await supabase.auth.signOut();
+      }
+    } catch (err: any) {
+      console.error('Unexpected error in fetchUserProfile:', err);
+      // alert('Error inesperado al cargar perfil: ' + (err.message || err));
+      // Don't log out here indiscriminately to avoid loops, but stop loading
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchData = async () => {
+    try {
+      // Fetch tickets with related data
+      const { data: ticketsData, error: ticketsError } = await supabase
+        .from('tickets')
+        .select(`
+          *,
+          profiles!tickets_user_id_fkey(name),
+          attachments(*)
+        `)
+        .order('priority', { ascending: false });
+
+      if (ticketsError) {
+        console.error('Error fetching tickets:', ticketsError);
+      }
+
+      // Fetch users
+      const { data: usersData, error: usersError } = await supabase
+        .from('profiles')
+        .select('*');
+
+      if (usersError) {
+        console.error('Error fetching users:', usersError);
+      }
+
+      if (ticketsData) {
+        const formattedTickets = ticketsData.map(t => ({
+          id: t.display_id,
+          userId: t.user_id,
+          userName: t.profiles?.name || 'Usuario Desconocido',
+          title: t.title,
+          type: t.type,
+          area: t.area,
+          status: t.status,
+          description: t.description,
+          priority: t.priority,
+          attachments: t.attachments || [],
+          messages: [],
+          createdAt: new Date(t.created_at).toLocaleString(),
+          updatedAt: new Date(t.updated_at).toLocaleString()
+        }));
+        setTickets(formattedTickets);
+      }
+
+      if (usersData) {
+        const formattedUsers = usersData.map(u => ({
+          id: u.id,
+          name: u.name,
+          email: u.email,
+          role: u.role,
+          area: u.area,
+          avatar: u.avatar_url
+        }));
+        setAllUsers(formattedUsers);
+      }
+    } catch (err) {
+      console.error('Error in fetchData:', err);
+    }
+  };
 
   const filteredTickets = useMemo(() => {
-    if (isAdmin) return tickets;
-    return tickets.filter(t => t.userId === currentUser.id);
-  }, [tickets, isAdmin, currentUser.id]);
+    let result = tickets;
+    if (!isAdmin && currentUser) {
+      result = tickets.filter(t => t.userId === currentUser.id);
+    }
 
-  const handleCreateTicket = (newTicket: Omit<Ticket, 'id' | 'createdAt' | 'updatedAt' | 'messages' | 'userName' | 'userId'>) => {
-    const ticket: Ticket = {
-      ...newTicket,
-      id: `T-${Math.floor(1000 + Math.random() * 9000)}`,
-      userId: currentUser.id,
-      userName: currentUser.name,
-      messages: [],
-      createdAt: new Date().toLocaleString(),
-      updatedAt: new Date().toLocaleString()
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase().trim();
+      result = result.filter(t =>
+        t.id.toLowerCase().includes(query) ||
+        t.title.toLowerCase().includes(query) ||
+        t.area.toLowerCase().includes(query) ||
+        t.userName.toLowerCase().includes(query)
+      );
+    }
+
+    // Sort by priority percentage (descending)
+    return [...result].sort((a, b) => b.priority - a.priority);
+  }, [tickets, isAdmin, currentUser?.id, searchQuery]);
+
+  const handleCreateTicket = async (newTicket: Omit<Ticket, 'id' | 'createdAt' | 'updatedAt' | 'messages' | 'userName' | 'userId'>) => {
+    if (!currentUser) {
+      alert('Debes iniciar sesión para crear un ticket');
+      return;
+    }
+
+    const displayId = `T-${Math.floor(1000 + Math.random() * 9000)}`;
+
+    try {
+      // 1. Create the ticket
+      const { data: ticketData, error: ticketError } = await supabase.from('tickets').insert({
+        display_id: displayId,
+        user_id: currentUser.id,
+        title: newTicket.title,
+        type: newTicket.type,
+        area: newTicket.area,
+        status: 'Enviado',
+        description: newTicket.description,
+        priority: newTicket.priority
+      }).select().single();
+
+      if (ticketError) {
+        console.error('Error creating ticket:', ticketError);
+        alert(`Error al crear ticket: ${ticketError.message}`);
+        return;
+      }
+
+      console.log('Ticket created successfully:', ticketData);
+
+      // 2. Save attachments if any
+      if (newTicket.attachments && newTicket.attachments.length > 0) {
+        const attachmentsToInsert = newTicket.attachments.map(att => ({
+          ticket_id: ticketData.id,
+          name: att.name,
+          type: att.type,
+          url: att.url,
+          size: att.size
+        }));
+
+        const { error: attachmentsError } = await supabase
+          .from('attachments')
+          .insert(attachmentsToInsert);
+
+        if (attachmentsError) {
+          console.error('Error saving attachments:', attachmentsError);
+          // Don't fail the whole operation, just log it
+        } else {
+          console.log(`Saved ${attachmentsToInsert.length} attachments`);
+        }
+      }
+
+      await fetchData();
+      setView('kanban');
+    } catch (err: any) {
+      console.error('Exception creating ticket:', err);
+      alert(`Error inesperado: ${err.message}`);
+    }
+  };
+
+  const handleAddUser = (userData: Omit<User, 'id' | 'avatar'>) => {
+    const newUser: User = {
+      ...userData,
+      id: `user-${Math.random().toString(36).substr(2, 9)}`,
+      avatar: `https://picsum.photos/seed/${userData.name}/100/100`
     };
-    setTickets([ticket, ...tickets]);
-    setView('kanban');
+    setAllUsers([...allUsers, newUser]);
+  };
+
+  const handleDeleteUser = (id: string) => {
+    if (id === currentUser.id) {
+      alert("No puedes eliminar tu propio acceso desde esta vista.");
+      return;
+    }
+    setAllUsers(allUsers.filter(u => u.id !== id));
   };
 
   const handleUpdateTicketStatus = (ticketId: string, newStatus: TicketStatus) => {
@@ -127,17 +370,30 @@ const App: React.FC = () => {
     ));
   };
 
-  const handleAddMessage = (ticketId: string, text: string) => {
+  const handleAddMessage = (ticketId: string, text: string, attachments?: Attachment[]) => {
     const newMessage: Message = {
       id: Math.random().toString(36).substr(2, 9),
       author: currentUser.name,
       role: currentUser.role,
       text,
+      attachments,
       timestamp: new Date().toLocaleString()
     };
     setTickets(prev => prev.map(t =>
       t.id === ticketId ? { ...t, messages: [...t.messages, newMessage], updatedAt: new Date().toLocaleString() } : t
     ));
+  };
+
+  const handleLogout = async () => {
+    try {
+      await supabase.auth.signOut();
+    } catch (error) {
+      console.error('Error signing out:', error);
+    } finally {
+      setCurrentUser(null);
+      setTickets([]);
+      setView('dashboard');
+    }
   };
   /* New Layout Logic */
   const [showNavbar, setShowNavbar] = useState(true);
@@ -158,38 +414,31 @@ const App: React.FC = () => {
     [tickets, selectedTicketId]
   );
 
+  if (loading) {
+    return (
+      <div className="h-screen bg-[#020202] flex flex-col items-center justify-center">
+        <div className="w-16 h-16 border-4 border-[var(--brand-primary)] border-t-transparent rounded-full animate-spin mb-4"></div>
+        <p className="text-[var(--text-secondary)] font-bold uppercase tracking-widest animate-pulse">Cargando CapitalNet...</p>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return <AuthView onAuthSuccess={handleSessionCheck} />;
+  }
+
   return (
     <div className={`flex h-screen transition-colors duration-500 overflow-hidden font-body relative`}>
-      {/* Background Effects */}
-      <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 0, opacity: 0.6, pointerEvents: 'none' }}>
-        <FloatingLines
-          enabledWaves={['top', 'middle', 'bottom']}
-          lineCount={[10, 15, 20]}
-          lineDistance={[8, 6, 4]}
-          bendRadius={5.0}
-          bendStrength={-0.5}
-          interactive={true}
-          parallax={true}
-        />
-      </div>
-
       {/* 🔮 GLASS SIDEBAR */}
       <aside className={`${isSidebarOpen ? 'w-72' : 'w-0 opacity-0 overflow-hidden'} transition-all duration-300 h-full glass-sidebar flex flex-col shrink-0 z-20 relative`}>
         {/* Logo Area */}
-        <div className="h-20 flex items-center px-6 border-b border-[var(--separator)]">
-          <div className="flex items-center justify-between w-full">
+        <div className="h-28 flex items-center px-6 border-b border-white/10">
+          <div className="flex items-center justify-start w-full">
             <img
-              src="/assets/logo.png"
+              src="assets/logo.png"
               alt="Capital Inteligente"
-              className="h-12 w-auto object-contain"
+              className="h-20 object-contain -ml-2"
             />
-            <button
-              onClick={() => setIsSidebarOpen(false)}
-              className="p-2 rounded-lg text-[var(--text-secondary)] hover:text-white hover:bg-white/10 transition-all"
-              title="Ocultar menú"
-            >
-              <PanelLeftClose size={20} />
-            </button>
           </div>
         </div>
 
@@ -245,16 +494,23 @@ const App: React.FC = () => {
             </button>
           )}
 
+          {isAdmin && (
+            <button
+              onClick={() => setView('access')}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${view === 'access'
+                ? 'bg-[var(--brand-primary)] text-white shadow-lg shadow-blue-500/20'
+                : 'text-[var(--text-secondary)] hover:bg-white/5 hover:text-white'
+                }`}
+            >
+              <Shield size={18} />
+              <span>Accesos</span>
+            </button>
+          )}
+
           <div className="pt-8 pb-2">
             <p className="px-4 text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest mb-2">Configuración</p>
             <button
-              onClick={() => setCurrentUser(isAdmin ? MOCK_USER_EXECUTIVE : MOCK_USER_ADMIN)}
-              className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium text-[var(--text-secondary)] hover:bg-white/5 hover:text-white transition-all"
-            >
-              <Settings size={18} />
-              <span>Cambiar a {isAdmin ? 'Ejecutivo' : 'Admin'}</span>
-            </button>
-            <button
+              onClick={handleLogout}
               className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium text-[#E5533D] hover:bg-[#E5533D]/10 transition-all"
             >
               <LogOut size={18} />
@@ -294,26 +550,15 @@ const App: React.FC = () => {
               <Search size={18} className="text-[var(--text-muted)]" />
               <input
                 type="text"
-                placeholder="Buscar ticket, ID o usuario..."
+                placeholder="Buscar ticket, ID o área..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
                 className="bg-transparent border-none text-sm font-medium outline-none w-full placeholder-[var(--text-muted)] text-white h-full"
               />
             </div>
           </div>
 
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => setIsDarkMode(!isDarkMode)}
-              className="w-10 h-10 flex items-center justify-center rounded-xl bg-white/5 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 transition-all border border-white/5"
-            >
-              {isDarkMode ? <Sun size={20} /> : <Moon size={20} />}
-            </button>
-            <div className="relative cursor-pointer group">
-              <div className="w-10 h-10 flex items-center justify-center rounded-xl bg-white/5 text-[var(--text-secondary)] group-hover:text-white group-hover:bg-white/10 transition-all border border-white/5">
-                <Bell size={20} />
-              </div>
-              <span className="absolute top-2 right-2.5 w-2 h-2 bg-[#E5533D] rounded-full border border-black"></span>
-            </div>
-          </div>
+
         </header>
 
         {/* Scrollable Content */}
@@ -388,7 +633,7 @@ const App: React.FC = () => {
                       <tr>
                         <th className="px-6 py-4">ID</th>
                         <th className="px-6 py-4">Título</th>
-                        <th className="px-6 py-4">Categoría</th>
+                        <th className="px-6 py-4">Prioridad</th>
                         <th className="px-6 py-4">Área</th>
                         <th className="px-6 py-4">Estado</th>
                         <th className="px-6 py-4 text-right">Acción</th>
@@ -403,12 +648,18 @@ const App: React.FC = () => {
                             <p className="text-[10px] text-[var(--text-muted)]">Actualizado {ticket.updatedAt}</p>
                           </td>
                           <td className="px-6 py-4">
-                            <span className={`px-2 py-1 rounded-lg text-[10px] font-bold uppercase ${ticket.type === TicketType.ERROR ? 'badge-error' :
-                              ticket.type === TicketType.IMPROVEMENT ? 'badge-success' :
-                                'badge-info'
-                              }`}>
-                              {ticket.type}
-                            </span>
+                            <div className="flex flex-col gap-1 w-24">
+                              <div className="flex justify-between items-center text-[9px] font-bold text-[var(--text-muted)]">
+                                <span>{ticket.priority}%</span>
+                              </div>
+                              <div className="w-full h-1 bg-white/5 rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full ${ticket.priority > 80 ? 'bg-red-500' : ticket.priority > 40 ? 'bg-amber-500' : 'bg-emerald-500'
+                                    }`}
+                                  style={{ width: `${ticket.priority}%` }}
+                                ></div>
+                              </div>
+                            </div>
                           </td>
                           <td className="px-6 py-4">
                             <span className="text-xs font-medium text-[var(--text-secondary)] bg-[var(--bg-secondary)] px-2 py-1 rounded-md border border-[var(--separator)]">
@@ -459,6 +710,14 @@ const App: React.FC = () => {
           {view === 'analytics' && isAdmin && (
             <AnalyticsView tickets={tickets} />
           )}
+
+          {view === 'access' && isAdmin && (
+            <UserAccessView
+              users={allUsers}
+              onCreateUser={handleAddUser}
+              onDeleteUser={handleDeleteUser}
+            />
+          )}
         </div>
       </main>
 
@@ -487,6 +746,7 @@ const App: React.FC = () => {
                   <div className="space-y-1">
                     <p className="text-[10px] text-[var(--text-muted)] font-bold uppercase tracking-widest">Información del Ticket</p>
                     <div className="flex flex-wrap gap-2">
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${selectedTicket.priority > 80 ? 'bg-red-500/20 text-red-500' : selectedTicket.priority > 40 ? 'bg-amber-500/20 text-amber-500' : 'bg-emerald-500/20 text-emerald-500'}`}>Prioridad {selectedTicket.priority}%</span>
                       <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${selectedTicket.type === TicketType.ERROR ? 'bg-[#E5533D]/20 text-[#E5533D]' : selectedTicket.type === TicketType.IMPROVEMENT ? 'bg-[#2FBF8F]/20 text-[#2FBF8F]' : 'bg-[#1E2E9A]/20 text-[#3B5BDB]'}`}>{selectedTicket.type}</span>
                       <span className="px-2 py-0.5 bg-[var(--bg-secondary)] text-[var(--text-secondary)] rounded text-[10px] font-bold uppercase border border-[var(--separator)]">{selectedTicket.area}</span>
                       <span className="px-2 py-0.5 bg-[var(--glass-bg)] text-[var(--text-primary)] rounded text-[10px] font-bold uppercase">{selectedTicket.status}</span>
@@ -530,7 +790,10 @@ const App: React.FC = () => {
                           </div>
                           <div className="flex items-center gap-2 shrink-0">
                             <button
-                              onClick={() => setPreviewAttachment(att)}
+                              onClick={() => {
+                                setAttachmentError(null);
+                                setPreviewAttachment(att);
+                              }}
                               className="w-10 h-10 flex items-center justify-center rounded-xl bg-white/60 text-[#007AFF] hover:bg-[#007AFF] hover:text-white transition-all shadow-sm border border-white/60"
                               title="Vista Previa"
                             >
@@ -570,6 +833,32 @@ const App: React.FC = () => {
                             : 'bg-white/60 text-slate-800 border border-white/40 shadow-sm'
                             }`}>
                             {msg.text}
+                            {msg.attachments && msg.attachments.length > 0 && (
+                              <div className="mt-2 space-y-2">
+                                {msg.attachments.map(att => (
+                                  <div
+                                    key={att.id}
+                                    onClick={() => {
+                                      setAttachmentError(null);
+                                      setPreviewAttachment(att);
+                                    }}
+                                    className="flex items-center gap-2 p-2 rounded-lg bg-white/10 cursor-pointer hover:bg-white/20 transition-all border border-white/10"
+                                  >
+                                    <div className="w-8 h-8 rounded-md overflow-hidden bg-black/20 flex items-center justify-center shrink-0">
+                                      {att.type.startsWith('image/') ? (
+                                        <img src={att.url} className="w-full h-full object-cover" />
+                                      ) : (
+                                        <Paperclip size={14} className="text-blue-400" />
+                                      )}
+                                    </div>
+                                    <div className="overflow-hidden">
+                                      <p className="text-[10px] font-bold truncate pr-2">{att.name}</p>
+                                      <p className="text-[8px] opacity-60 uppercase">{att.size}</p>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
                           <p className="text-[10px] text-slate-400 px-1 font-medium">{msg.author} • {msg.timestamp}</p>
                         </div>
@@ -581,22 +870,99 @@ const App: React.FC = () => {
             </div>
 
             <div className="p-6 border-t border-[var(--separator)] space-y-3" style={{ background: 'rgba(255, 255, 255, 0.03)' }}>
+              {/* Chat File Preview */}
+              {isAdmin && chatAttachments.length > 0 && (
+                <div className="flex gap-2 mb-2 overflow-x-auto pb-2">
+                  {chatAttachments.map(att => (
+                    <div key={att.id} className="relative group shrink-0">
+                      <div className="w-12 h-12 rounded-lg border border-white/20 bg-white/5 overflow-hidden">
+                        {att.type.startsWith('image/') ? (
+                          <img src={att.url} className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center">
+                            <Paperclip size={16} className="text-[var(--brand-primary)]" />
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => setChatAttachments(chatAttachments.filter(a => a.id !== att.id))}
+                        className="absolute -top-1 -right-1 bg-red-500 rounded-full p-0.5 text-white shadow-lg"
+                      >
+                        <X size={10} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               <div className="flex gap-3 items-center px-4 py-3 rounded-2xl" style={{ background: 'rgba(255, 255, 255, 0.05)', border: '1px solid rgba(255, 255, 255, 0.2)' }}>
+                {isAdmin && (
+                  <>
+                    <button
+                      onClick={() => chatFileInputRef.current?.click()}
+                      className="text-[var(--text-muted)] hover:text-white transition-colors"
+                      title="Adjuntar multimedia"
+                    >
+                      <Paperclip size={18} />
+                    </button>
+                    <input
+                      type="file"
+                      multiple
+                      className="hidden"
+                      ref={chatFileInputRef}
+                      accept="image/*,video/*,.pdf,.doc,.docx"
+                      onChange={async (e) => {
+                        if (e.target.files) {
+                          try {
+                            const files: File[] = Array.from(e.target.files);
+                            const uploadedFiles = await uploadMultipleFiles(files);
+
+                            const newAttachments = uploadedFiles.map(file => ({
+                              id: file.id,
+                              name: file.name,
+                              type: file.type,
+                              url: file.url,
+                              size: file.size
+                            }));
+
+                            setChatAttachments([...chatAttachments, ...newAttachments]);
+
+                            // Reset the input
+                            if (chatFileInputRef.current) {
+                              chatFileInputRef.current.value = '';
+                            }
+                          } catch (error) {
+                            console.error('Error uploading chat files:', error);
+                            alert('Error al subir archivos. Por favor intenta de nuevo.');
+                          }
+                        }
+                      }}
+                    />
+                  </>
+                )}
                 <input
                   type="text"
                   placeholder="Escribe un mensaje..."
-                  className="bg-transparent border-none outline-none flex-1 text-sm text-white placeholder-[var(--text-muted)]"
+                  className="bg-transparent border-none outline-none flex-1 text-sm text-white placeholder-[var(--text-muted)] h-full"
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter' && e.currentTarget.value.trim()) {
-                      handleAddMessage(selectedTicket.id, e.currentTarget.value);
+                    if (e.key === 'Enter' && (e.currentTarget.value.trim() || chatAttachments.length > 0)) {
+                      handleAddMessage(selectedTicket.id, e.currentTarget.value, chatAttachments);
                       e.currentTarget.value = '';
+                      setChatAttachments([]);
                     }
                   }}
                 />
-                <button className="text-[var(--text-muted)] hover:text-[var(--brand-secondary)] transition-colors">
-                  <Sparkles size={18} />
-                </button>
-                <button className="text-[var(--brand-primary)] hover:text-[var(--brand-secondary)] transition-colors">
+                <button
+                  onClick={(e) => {
+                    const input = (e.currentTarget.previousSibling as HTMLInputElement);
+                    if (input.value.trim() || chatAttachments.length > 0) {
+                      handleAddMessage(selectedTicket.id, input.value, chatAttachments);
+                      input.value = '';
+                      setChatAttachments([]);
+                    }
+                  }}
+                  className="text-[var(--brand-primary)] hover:text-[var(--brand-secondary)] transition-colors"
+                >
                   <Send size={18} />
                 </button>
               </div>
@@ -624,12 +990,40 @@ const App: React.FC = () => {
                   className="max-w-full max-h-[75vh] object-contain rounded-2xl"
                 />
               ) : previewAttachment.type.startsWith('video/') ? (
-                <video
-                  src={previewAttachment.url}
-                  controls
-                  autoPlay
-                  className="max-w-full max-h-[75vh] rounded-2xl shadow-2xl"
-                />
+                attachmentError ? (
+                  <div className="w-full max-w-3xl aspect-video flex flex-col items-center justify-center text-white bg-slate-900/80 rounded-2xl p-8 border border-white/10">
+                    <AlertCircle size={64} className="mb-4 text-red-500" />
+                    <p className="font-bold text-xl mb-2 text-red-400">No se pudo reproducir el video</p>
+                    <p className="text-slate-300 text-sm mb-8 text-center max-w-md">{attachmentError}</p>
+                    <a
+                      href={previewAttachment.url}
+                      download={previewAttachment.name}
+                      className="flex items-center gap-2 bg-[#007AFF] px-6 py-3 rounded-xl font-bold hover:bg-[#0062CC] transition-all"
+                    >
+                      <Download size={20} /> Intentar Descargar
+                    </a>
+                  </div>
+                ) : (
+                  <video
+                    src={previewAttachment.url}
+                    controls
+                    autoPlay
+                    preload="metadata"
+                    playsInline
+                    crossOrigin="anonymous"
+                    className="max-w-full max-h-[75vh] rounded-2xl shadow-2xl"
+                    onError={(e) => {
+                      console.error('Error loading video:', e);
+                      const videoElement = e.currentTarget;
+                      console.error('Video src:', videoElement.src);
+                      console.error('Video error code:', videoElement.error?.code);
+                      setAttachmentError('El formato del video no es compatible o hubo un error de red. Intenta descargarlo para verlo.');
+                    }}
+                  >
+                    <source src={previewAttachment.url} type={previewAttachment.type} />
+                    Tu navegador no soporta la reproducción de video.
+                  </video>
+                )
               ) : (
                 <div className="w-96 h-96 flex flex-col items-center justify-center text-white bg-slate-900/50 rounded-2xl">
                   <FileText size={80} className="mb-4 text-[#007AFF]" />

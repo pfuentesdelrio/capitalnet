@@ -2,10 +2,11 @@
 import React, { useState, useRef } from 'react';
 import { TicketType, Attachment, TicketArea } from '../types';
 // Added missing PlusCircle import
-import { Send, Image, FileVideo, Paperclip, AlertCircle, X, ChevronRight, PlusCircle } from 'lucide-react';
+import { Send, Image, FileVideo, Paperclip, AlertCircle, X, ChevronRight, PlusCircle, Loader2 } from 'lucide-react';
+import { uploadMultipleFiles, UploadedFile } from '../utils/fileUpload';
 
 interface TicketFormProps {
-  onSubmit: (data: { title: string; type: TicketType; area: TicketArea; description: string; status: any; attachments: Attachment[] }) => void;
+  onSubmit: (data: { title: string; type: TicketType; area: TicketArea; description: string; priority: number; status: any; attachments: Attachment[] }) => void;
   onCancel: () => void;
 }
 
@@ -14,21 +15,41 @@ const TicketForm: React.FC<TicketFormProps> = ({ onSubmit, onCancel }) => {
   const [type, setType] = useState<TicketType>(TicketType.HELP);
   const [area, setArea] = useState<TicketArea>(TicketArea.COMMERCIAL);
   const [description, setDescription] = useState('');
+  const [priority, setPriority] = useState(50);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
-      // Fix: Explicitly type 'file' as 'File' to resolve 'unknown' type errors for file properties in the map function
-      const newFiles = Array.from(e.target.files).map((file: File) => ({
-        id: Math.random().toString(36).substr(2, 9),
-        name: file.name,
-        type: file.type,
-        url: URL.createObjectURL(file),
-        size: `${Math.round(file.size / 1024)}KB`
-      }));
-      setAttachments([...attachments, ...newFiles]);
+      setIsUploading(true);
+      setUploadError(null);
+
+      try {
+        const files: File[] = Array.from(e.target.files);
+        const uploadedFiles = await uploadMultipleFiles(files);
+
+        const newAttachments = uploadedFiles.map((file: UploadedFile) => ({
+          id: file.id,
+          name: file.name,
+          type: file.type,
+          url: file.url,
+          size: file.size
+        }));
+
+        setAttachments([...attachments, ...newAttachments]);
+      } catch (error) {
+        console.error('Error uploading files:', error);
+        setUploadError('Error al subir archivos. Por favor intenta de nuevo.');
+      } finally {
+        setIsUploading(false);
+        // Reset the input
+        if (fileInputRef.current) {
+          fileInputRef.current.value = '';
+        }
+      }
     }
   };
 
@@ -41,7 +62,8 @@ const TicketForm: React.FC<TicketFormProps> = ({ onSubmit, onCancel }) => {
       type,
       area,
       description,
-      status: 'Enviado', // This matches TicketStatus.SENT but we cast for simplicity in local mock
+      priority,
+      status: 'Enviado',
       attachments
     });
   };
@@ -107,6 +129,30 @@ const TicketForm: React.FC<TicketFormProps> = ({ onSubmit, onCancel }) => {
             </div>
           </div>
 
+          <div className="space-y-3 p-4 rounded-2xl bg-white/5 border border-white/5">
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest pl-1">Porcentaje de Prioridad / Urgencia</label>
+              <span className={`text-xs font-bold px-2 py-0.5 rounded-lg ${priority > 80 ? 'bg-red-500/20 text-red-500' : priority > 40 ? 'bg-amber-500/20 text-amber-500' : 'bg-emerald-500/20 text-emerald-500'
+                }`}>
+                {priority}%
+              </span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              step="5"
+              value={priority}
+              onChange={(e) => setPriority(parseInt(e.target.value))}
+              className="w-full h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer accent-[var(--brand-primary)]"
+            />
+            <div className="flex justify-between text-[8px] font-bold text-[var(--text-muted)] uppercase tracking-tighter px-1">
+              <span>Baja</span>
+              <span>Media</span>
+              <span>Crítica</span>
+            </div>
+          </div>
+
           <div className="space-y-1.5 relative">
             <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest pl-1">
               Descripción Detallada
@@ -123,20 +169,43 @@ const TicketForm: React.FC<TicketFormProps> = ({ onSubmit, onCancel }) => {
 
           <div className="space-y-2">
             <label className="text-[10px] font-bold text-[var(--text-muted)] uppercase tracking-widest pl-1">Multimedia / Adjuntos</label>
+
+            {uploadError && (
+              <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-red-500 text-xs">
+                <AlertCircle size={16} />
+                <span>{uploadError}</span>
+              </div>
+            )}
+
             <div className="flex flex-wrap gap-3">
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="flex flex-col items-center justify-center gap-1 w-16 h-16 border border-dashed border-[var(--glass-border)] rounded-xl text-[var(--text-muted)] transition-all hover:bg-[var(--glass-bg)] hover:border-[var(--glass-highlight)]"
+                disabled={isUploading}
+                className="flex flex-col items-center justify-center gap-1 w-16 h-16 border border-dashed border-[var(--glass-border)] rounded-xl text-[var(--text-muted)] transition-all hover:bg-[var(--glass-bg)] hover:border-[var(--glass-highlight)] disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <PlusCircle size={20} />
-                <span className="text-[9px] font-bold">Subir</span>
+                {isUploading ? (
+                  <>
+                    <Loader2 size={20} className="animate-spin" />
+                    <span className="text-[9px] font-bold">Subiendo...</span>
+                  </>
+                ) : (
+                  <>
+                    <PlusCircle size={20} />
+                    <span className="text-[9px] font-bold">Subir</span>
+                  </>
+                )}
               </button>
 
               {attachments.map(att => (
                 <div key={att.id} className="relative w-16 h-16 bg-white/10 dark:bg-black/20 rounded-xl overflow-hidden border border-white/20 group">
                   {att.type.startsWith('image/') ? (
                     <img src={att.url} alt={att.name} className="w-full h-full object-cover" />
+                  ) : att.type.startsWith('video/') ? (
+                    <div className="w-full h-full flex flex-col items-center justify-center p-1 text-center bg-black/40">
+                      <FileVideo size={16} className="text-[#007AFF] mb-0.5" />
+                      <span className="text-[8px] font-bold truncate w-full px-0.5 text-white">Video</span>
+                    </div>
                   ) : (
                     <div className="w-full h-full flex flex-col items-center justify-center p-1 text-center">
                       <Paperclip size={16} className="text-[#007AFF] mb-0.5" />

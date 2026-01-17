@@ -31,20 +31,36 @@ const TicketCard: React.FC<{ ticket: Ticket; onOpen: () => void; isAdmin: boolea
       className="glass-card p-4 transition-all cursor-pointer group shadow-premium"
     >
       <div className="flex justify-between items-start mb-3">
-        <div className="flex flex-wrap gap-1.5">
-          <span className={`px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase tracking-wider ${ticket.type === TicketType.ERROR ? 'badge-error' :
-            ticket.type === TicketType.IMPROVEMENT ? 'badge-success' :
-              'badge-info'
-            }`}>
-            {ticket.type}
-          </span>
-          <span className="px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase tracking-wider bg-[var(--bg-secondary)] border border-[var(--separator)] text-[var(--text-muted)]">
-            {ticket.area}
-          </span>
+        <div className="flex flex-col gap-1.5 flex-1 pr-4">
+          <div className="flex items-center justify-between text-[9px] font-bold text-[var(--text-muted)] uppercase tracking-widest pl-0.5">
+            <span>Prioridad</span>
+            <span className={ticket.priority > 80 ? 'text-red-500' : ticket.priority > 40 ? 'text-amber-500' : 'text-emerald-500'}>
+              {ticket.priority}%
+            </span>
+          </div>
+          <div className="w-full h-1 bg-white/5 rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full ${ticket.priority > 80 ? 'bg-red-500' : ticket.priority > 40 ? 'bg-amber-500' : 'bg-emerald-500'
+                }`}
+              style={{ width: `${ticket.priority}%` }}
+            ></div>
+          </div>
         </div>
         <button className="text-[var(--text-muted)] hover:text-white transition-colors">
           <MoreHorizontal size={14} />
         </button>
+      </div>
+
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        <span className="px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase tracking-wider bg-[var(--bg-secondary)] border border-[var(--separator)] text-[var(--text-muted)]">
+          {ticket.area}
+        </span>
+        <span className={`px-2 py-0.5 rounded-lg text-[10px] font-bold uppercase tracking-wider ${ticket.type === TicketType.ERROR ? 'badge-error' :
+          ticket.type === TicketType.IMPROVEMENT ? 'badge-success' :
+            'badge-info'
+          }`}>
+          {ticket.type}
+        </span>
       </div>
 
       <h4 className="text-sm font-bold text-white mb-2 line-clamp-2 leading-snug tracking-tight">{ticket.title}</h4>
